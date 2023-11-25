@@ -1,0 +1,258 @@
+---
+title: "TP Politica 2"
+output: html_document
+date: "2023-11-06"
+---
+
+
+# Limpiar memoria
+rm(list=ls())
+gc()
+
+# Librerias
+library(tidyverse)
+library(rsample)
+library(yardstick)
+library(rpart)
+library(rpart.plot)
+library(ranger)
+library(caret)
+library(dplyr)
+
+#Cargar datos
+X1datos <- read_excel("C:/Users/Escorpio/Desktop/Pelusa/Data Journey/R/ModeloDeudores/1datos.xlsx")
+score_data_raw <- X1datos
+
+#Limpieza de la BBDD y filtracion de variables
+selected_data <- score_data_raw %>%
+  select('Bankrupt', 
+         `ROA(C) before interest and depreciation before interest`,
+         `ROA(A) before interest and % after tax`,
+         `ROA(B) before interest and depreciation after tax`,
+         `Operating Gross Margin`,
+         `Pre-tax net Interest Rate`,
+         `Research and development expense rate`,
+         `Per Share Net profit before tax (Yuan Â¥)`,
+         `Interest Expense Ratio`,
+         `Net worth/Assets`,
+         `Total Asset Turnover`,
+         `Liability to Equity`)
+
+# Verificar la nueva tabla
+head(selected_data)
+
+# Calcular estadísticas para las variables en selected_data
+stat <- selected_data %>%
+  pivot_longer(everything(), names_to = 'Variable', values_to = 'Value') %>%
+  group_by(Variable) %>% 
+  summarise(
+    Obs = n(),
+    Media = mean(Value, na.rm = TRUE),
+    Mediana = median(Value, na.rm = TRUE),
+    SD = sd(Value, na.rm = TRUE),
+    Min = min(Value, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE)) %>% 
+  ungroup()
+
+#Transformacion de Variables para reducir el sesgo
+selected_data <- selected_data %>%
+  mutate(
+    `Bankrupt` = factor(`Bankrupt`),
+    `ROA(C) before interest and depreciation before interest` = log(1 + `ROA(C) before interest and depreciation before interest`),
+    `ROA(A) before interest and % after tax` = log(1 + `ROA(A) before interest and % after tax`),
+    `ROA(B) before interest and depreciation after tax` = log(1 + `ROA(B) before interest and depreciation after tax`),
+    `Operating Gross Margin` = log(1 + `Operating Gross Margin`),
+    `Pre-tax net Interest Rate` = log(1 + `Pre-tax net Interest Rate`),
+    `Research and development expense rate` = log(1 + `Research and development expense rate`),
+    `Per Share Net profit before tax (Yuan Â¥)` = log(1 + `Per Share Net profit before tax (Yuan Â¥)`),
+    `Interest Expense Ratio` = log(1 + `Interest Expense Ratio`),
+    `Net worth/Assets` = log(1 + `Net worth/Assets`),
+    `Total Asset Turnover` = log(1 + `Total Asset Turnover`),
+    `Liability to Equity` = log(1 + `Liability to Equity`)
+  )
+
+# División de la muestra en 80% para entrenamiento y 20% para prueba
+set.seed(1234)
+train_test_split <- initial_split(selected_data, prop = 0.8)
+train_test_split
+
+# Obtener los conjuntos de entrenamiento y prueba
+train_tbl <- training(train_test_split)
+test_tbl <- testing(train_test_split)
+
+# Fórmula para el modelo
+formula <- formula(`Bankrupt` ~ .)
+# Y observado a 0/1 para confusionMatrix
+obs <- factor(test_tbl$`Bankrupt`)
+
+# Estimar el modelo lineal
+lm_mod <- lm(as.numeric(Bankrupt) ~ ., data = train_tbl)
+# Resumen del modelo lineal
+summary(lm_mod)
+# Un resumen del modelo lineal
+tidy_summary <- broom::tidy(lm_mod)
+
+# Estimar el modelo logit
+glm_mod <- glm(Bankrupt ~ ., data = train_tbl, family = binomial)
+summary(glm_mod)
+
+# Predecir probabilidades usando el modelo logit
+glm.probs <- predict(glm_mod, test_tbl, type = 'response')
+
+# Convertir probabilidades en clasificación binaria (0 o 1)
+glm.class <- factor(ifelse(glm.probs > 0.5, 1, 0))
+
+# Calcular la matriz de confusión
+cm_logit <- confusionMatrix(glm.class, obs, positive = '1')
+cm_logit
+
+# Estimar un árbol de decisión
+set.seed(4321)
+rpart.mod <- rpart(Bankrupt ~ .,
+                   data = train_tbl,  
+                   control = rpart.control(minsplit = 20,  #Mínimo de observaciones por nodo para dividir
+                                           minbucket = 6,  #Mínimo de observaciones en un nodo terminal
+                                           cp = 0,         #Complejidad del árbol
+                                           xval = 0,       #Número de validaciones cruzadas
+                                           maxdepth = 16)) #Profundidad del árbol
+
+# Ver los nombres de las variables del modelo de árbol
+names(rpart.mod)
+
+# Predecir probabilidades usando el modelo de árbol de decisión
+rpart.prob <- predict(rpart.mod, test_tbl)
+
+# Convertir probabilidades en clasificación binaria (0 o 1) usando un umbral de 0.5
+rpart.class <- factor(ifelse(rpart.prob[, '1'] > 0.5, 1, 0))
+
+# Calcular la matriz de confusión para el modelo de árbol de decisión
+cm_rpart <- confusionMatrix(rpart.class, obs, positive = '1')
+
+# Mostrar la matriz de confusión
+cm_rpart
+length(obs)
+length(rpart.class)
+length(cm_logit)
+
+prp(rpart.mod, extra=101, digits=2, branch=1, type=4, varlen=0, faclen=0)
+rpartVarImp = as_tibble_row(rpart.mod$variable.importance) %>%
+ pivot_longer(everything(), names_to = 'Variable', values_to = 'Value') %>%
+ arrange(desc(Value)) 
+# La tabla rpartVarImp nos muestra la importancia relativa de cada variable para predecir, ordenadas de mayor a menor:
+rpartVarImp
+
+# Random Forest
+
+# Establecer la semilla para reproducibilidad
+set.seed(1234)
+
+# Configurar el modelo Random Forest
+ranger.mod <- ranger(
+  Bankrupt ~ .,                  # La fórmula define la variable objetivo y las características predictoras
+  data = train_tbl,              # Los datos de entrenamiento
+  probability = TRUE,            # Estimar probabilidades
+  num.trees = 300,               # Número de árboles en el bosque
+  min.node.size = 15,            # Tamaño mínimo de los nodos hoja
+  mtry = 3,                      # Número de variables a considerar en cada división
+  splitrule = 'gini',            # Criterio de división
+  importance = 'impurity'        # Método para calcular la importancia de las variables
+)
+
+# Obtener los nombres de las variables del modelo entrenado
+names(ranger.mod)
+#Arreglamos los nombres de las columnas por problemas de compatibilidad
+colnames(train_tbl) <- make.names(colnames(train_tbl))
+colnames(test_tbl) <- make.names(colnames(test_tbl))
+
+ranger.prob = predict(ranger.mod, test_tbl)
+ranger.class = factor(ifelse(ranger.prob$predictions[, '1']>0.5, 1, 0))
+
+cm_ranger = confusionMatrix(ranger.class, obs, positive = '1')
+cm_ranger
+# Error del RF
+1 - cm_ranger$overall[['Accuracy']]
+
+rangerVarImp = as_tibble_row(ranger.mod$variable.importance) %>%
+               pivot_longer(everything(), names_to = 'Variable', values_to = 'Value') %>%
+               arrange(desc(Value)) 
+rangerVarImp
+
+install.packages("iml")
+library(iml)
+
+train_tbl1 = train_tbl %>% dplyr::select(-Bankrupt)
+pfun = function(object, newdata) {predict(object, data = newdata)$predictions[, 2]}
+
+predictor = Predictor$new(ranger.mod, data = train_tbl1, y = factor(train_tbl$Bankrupt), predict.fun = pfun)
+#Graficos de dependencia Parcial
+pdp = FeatureEffect$new(predictor, feature = 'Per.Share.Net.profit.before.tax..Yuan.Â..', method = 'pdp') |> plot()
+pdp = FeatureEffect$new(predictor, feature = 'Net.worth.Assets', method = 'pdp') |> plot()
+pdp = FeatureEffect$new(predictor, feature = 'ROA.A..before.interest.and...after.tax', method = 'pdp') |> plot()
+pdp = FeatureEffect$new(predictor, feature = 'Interest.Expense.Ratio', method = 'pdp') |> plot()
+pdp = FeatureEffect$new(predictor, feature = 'Liability.to.Equity', method = 'pdp') |> plot()
+pdp = FeatureEffect$new(predictor, feature = 'Research.and.development.expense.rate', method = 'pdp') |> plot()
+pdp
+
+#Presentacion de Resultados
+tab_acc = tibble(logit  = cm_logit$overall[['Accuracy']],
+                 rpart  = cm_rpart$overall[['Accuracy']],
+                 ranger = cm_ranger$overall[['Accuracy']])
+                
+tab_acc = tab_acc |>
+          pivot_longer(everything(), names_to='Modelo', values_to='Accuracy') |>
+          arrange(desc(Accuracy))
+tab_acc 
+
+#Presentamos las AUC
+tab <- tibble(obs = factor(test_tbl$Bankrupt),
+              logit = glm.probs,
+              rpart = rpart.prob[, '1'],
+              ranger = ranger.prob$predictions[, '1'])
+              
+tab_auc <- tibble(logit = roc_auc(tab, truth = obs, logit, event_level = 'second')$.estimate,
+                  rpart = roc_auc(tab, truth = obs, rpart, event_level = 'second')$.estimate,
+                  ranger = roc_auc(tab, truth = obs, ranger, event_level = 'second')$.estimate)
+                  
+tab_auc <- tab_auc |> 
+           pivot_longer(everything(), names_to = "Modelo", values_to = "AUC") |>
+           arrange(desc(AUC))
+           
+print(tab_auc)
+#GRID Search
+n_features <- length(setdiff(names(train_tbl), "Bankrupt"))
+
+# crea la grilla de hyperparametros
+hyper_grid = expand.grid(
+  num.trees = c(50, 100, 150, 200),
+  mtry = floor(n_features * c(.05, .15, .25, .333, .4)),
+  min.node.size = c(1, 3, 5, 10), 
+  replace = c(TRUE, FALSE),                               
+  sample.fraction = c(.5, .63, .75, .8)               
+)
+
+# realiza el grid search
+for(i in seq_len(nrow(hyper_grid))) {
+# estima el modelo para la combinacion i de hyperparametros
+  fit <- ranger(
+    formula         = formula, 
+    data            = train_tbl,  
+    probability     = FALSE, 
+    num.trees       = hyper_grid$num.trees[i],
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$min.node.size[i],
+    replace         = hyper_grid$replace[i],
+    sample.fraction = hyper_grid$sample.fraction[i],
+    verbose         = FALSE,
+    seed            = 1234,
+    respect.unordered.factors = 'order',
+    splitrule       = 'gini',
+    importance      = 'impurity'
+  )
+# error (1 - accuracy) 
+  hyper_grid$error[i] = fit$prediction.error
+}
+
+# top 10 
+hyper_grid |>
+  arrange(error) |> head(10)
+  
